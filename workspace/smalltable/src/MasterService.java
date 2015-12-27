@@ -1,0 +1,101 @@
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.io.PrintWriter;
+import java.net.Socket;
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+
+public class MasterService implements Runnable{
+	BufferedReader in;
+	PrintWriter out;
+	static String prefix = "master/";
+	Socket socket;
+    public MasterService(Socket clientSocket){
+    	this.socket = clientSocket;
+    }
+
+    public void run(){
+        try{
+            this.out = new PrintWriter(socket.getOutputStream(), true);
+            this.in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+            // loop till client closes table
+            String message = in.readLine();
+            while(message != null) {
+            	this.recv(message);
+            	message = in.readLine();
+            }
+            socket.close();
+        }
+        catch(IOException e){
+        	
+        }
+    }
+    
+    private String createResponse(boolean status, String data) {
+    	JsonObject JsonMessage = new JsonObject();
+		JsonMessage.addProperty("status", status);
+		JsonElement jsonData = new JsonParser().parse(data);
+		JsonMessage.add("data", jsonData);
+		
+		return Utils.gson.toJson(JsonMessage);
+    }
+    
+    private String preprocess(String operation, JsonElement message) throws IOException {
+    	SmallTable table = Utils.gson.fromJson(message, SmallTable.class);
+    	
+        Path path = new Path(prefix + table.tableName + ".smalltable");
+    	if(operation.equals("create") || operation.equals("update")) {
+    		// create table - create file in /master/name.smalltable
+    		// update table - update file /master/name.smalltable
+    		System.out.println("Create table");
+            if (Utils.fs.exists(path)) {
+                System.out.println("overwring existing table " + table.tableName);
+                Utils.fs.delete(path, true);
+            }
+            BufferedWriter bufferedWriter = new BufferedWriter(new OutputStreamWriter(Utils.fs.create(path)));
+            bufferedWriter.write(Utils.gson.toJson(message));
+            bufferedWriter.close();
+            return createResponse(true, "");
+    	}else if(operation.equals("open")) {
+    		// open table - open file master/name.smalltable
+    		System.out.println("Opening " + path);
+    		if(!Utils.fs.exists(path)) {
+    			return createResponse(false, "");
+    		}
+    		BufferedReader bufferedReader = new BufferedReader(new InputStreamReader(Utils.fs.open(path)));
+		    String contents = "";
+		    String line = bufferedReader.readLine();
+		    while (line != null) {
+		    	contents = contents + line;
+		    	line = bufferedReader.readLine();
+		   }
+		   
+		   return createResponse(true, contents);
+    	}else if(operation.equals("delete")) {
+    	   boolean status = Utils.fs.delete(path, true);
+		   
+		   return createResponse(status, "");
+    	}
+    	return createResponse(false, "");
+	}
+    
+    public void recv(String message) throws IOException{
+    	System.out.println(message);
+		JsonObject jsonMessage = new JsonParser().parse(message).getAsJsonObject();
+		String operation = jsonMessage.get("operation").getAsString();
+		JsonElement data = jsonMessage.get("data");
+		String response = preprocess(operation, data);
+        out.println(response);
+	}
+	
+}

@@ -1,0 +1,137 @@
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.conf.Configured;
+import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.io.IntWritable;
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.mapreduce.Job;
+import org.apache.hadoop.mapreduce.lib.input.FileInputFormat;
+import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
+import org.apache.hadoop.util.Tool;
+import org.apache.hadoop.util.ToolRunner;
+
+public class TFIDFDriver extends Configured implements Tool {
+
+    // where to put the data in hdfs when we're done
+    private static final String[] OUTPUT_PATH = {"word-count", "compute-tfidf", "filter-tfidf", "sort-tfidf"};
+    
+    private static int FMAX = 2;
+    private static int WMAX = 5;
+    
+    private static String INPUT_PATH = "data";
+    private static String STOPWORDS_PATH = "stopwords.txt";
+    public int run(String[] args) throws Exception {
+        Configuration conf = getConf();
+        FileSystem fs = FileSystem.get(conf);
+        
+        if(args.length >= 1)
+        	INPUT_PATH = args[0];
+        
+        if(args.length >= 2)
+        	FMAX = Integer.parseInt(args[1]);
+        
+        if(args.length >= 3)
+        	WMAX = Integer.parseInt(args[2]);
+        
+        if(args.length >= 4)
+        	STOPWORDS_PATH = args[3];
+        
+        Path userInputPath = new Path(INPUT_PATH);
+        
+        // remove all output directories
+        for(String outputDir: OUTPUT_PATH) {
+	        Path tempPath = new Path(outputDir);
+	        if (fs.exists(tempPath)) {
+	            fs.delete(tempPath, true);
+	        }
+        }
+       
+        //Getting the number of documents from the user's input directory.
+        FileStatus[] userFilesStatusList = fs.listStatus(userInputPath);
+        final int numberOfUserInputFiles = userFilesStatusList.length;
+        String[] fileNames = new String[numberOfUserInputFiles];
+        for (int i = 0; i < numberOfUserInputFiles; i++) {
+            fileNames[i] = userFilesStatusList[i].getPath().getName(); 
+        }
+        
+        // Populate StopWords
+        Path stopWordsPath = new Path(STOPWORDS_PATH);
+        BufferedReader br = new BufferedReader(new InputStreamReader(fs.open(stopWordsPath)));
+        String line = br.readLine();
+        while (line != null){
+                StopWords.add(line);
+                line = br.readLine();
+        }
+        Job job1 = new Job(conf, "Compute Frequency for word/phrase in Document");
+
+        job1.setJarByClass(TFIDFDriver.class);
+        job1.setMapperClass(FrequencyMapper.class);
+        job1.setReducerClass(FrequencyReducer.class);
+
+        job1.setOutputKeyClass(Text.class);
+        job1.setOutputValueClass(IntWritable.class);
+        
+        FileInputFormat.addInputPath(job1, new Path(INPUT_PATH));
+        FileOutputFormat.setOutputPath(job1, new Path(OUTPUT_PATH[0]));
+
+        job1.waitForCompletion(true);
+        
+        Configuration conf2 = getConf();
+        conf2.setInt("numberOfDocsInCorpus", numberOfUserInputFiles);
+        Job job2 = new Job(conf2, "Compute TFIDF for each word/phrase");
+        
+        job2.setJarByClass(TFIDFDriver.class);
+        job2.setMapperClass(TFIDFMapper.class);
+        job2.setReducerClass(TFIDFReducer.class);
+
+        job2.setOutputKeyClass(Text.class);
+        job2.setOutputValueClass(Text.class);
+        
+        FileInputFormat.addInputPath(job2, new Path(OUTPUT_PATH[0]));
+        FileOutputFormat.setOutputPath(job2, new Path(OUTPUT_PATH[1]));
+
+        job2.waitForCompletion(true);
+        
+        Configuration conf3 = getConf();
+        conf3.setInt("WMAX", WMAX);
+        Job job3 = new Job(conf3, "Filter WMAX words for wach file according to tfidf");
+        
+        job3.setJarByClass(TFIDFDriver.class);
+        job3.setMapperClass(FilterMapper.class);
+        job3.setReducerClass(FilterReducer.class);
+
+        job3.setOutputKeyClass(Text.class);
+        job3.setOutputValueClass(Text.class);
+        
+        FileInputFormat.addInputPath(job3, new Path(OUTPUT_PATH[1]));
+        FileOutputFormat.setOutputPath(job3, new Path(OUTPUT_PATH[2]));
+
+        job3.waitForCompletion(true);
+        
+        Configuration conf4 = getConf();
+        conf4.setInt("FMAX", FMAX);
+        Job job4 = new Job(conf4, "List FMAX files for each word/phrase");
+        
+        job4.setJarByClass(TFIDFDriver.class);
+        job4.setMapperClass(FinalMapper.class);
+        job4.setReducerClass(FinalReducer.class);
+
+        job4.setOutputKeyClass(Text.class);
+        job4.setOutputValueClass(Text.class);
+        
+        FileInputFormat.addInputPath(job4, new Path(OUTPUT_PATH[2]));
+        FileOutputFormat.setOutputPath(job4, new Path(OUTPUT_PATH[3]));
+
+        return job4.waitForCompletion(true) ? 0 : 1;
+
+    }
+
+    public static void main(String[] args) throws Exception {
+        int res = ToolRunner.run(new Configuration(), new TFIDFDriver(), args);
+        System.exit(res);
+    }
+}

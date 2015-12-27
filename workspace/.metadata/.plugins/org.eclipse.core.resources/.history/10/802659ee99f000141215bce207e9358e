@@ -1,0 +1,153 @@
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
+import java.util.Map.Entry;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.FileUtil;
+import org.apache.hadoop.fs.Path;
+
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import com.google.gson.reflect.TypeToken;
+
+
+public class TabletDriver {
+	private static String prefix = "node1/";
+	static TreeMap<String, TreeMap<String, SmallRow>> memtable 
+	= new TreeMap<String, TreeMap<String, SmallRow>>();
+	
+	static TreeMap<String, TreeSet<Path>> fileMap = new TreeMap<String, TreeSet<Path>>();
+	public static void main(String[] args) throws IOException {
+		FileSystem fs = Utils.fs;
+        Path path = new Path(prefix);
+        // create tablet directory, if there is not one already
+        if(!fs.exists(path)) {
+        	fs.mkdirs(path);
+        }
+        
+        // Populate fileMap
+        FileStatus[] status = fs.listStatus(path);
+        Path[] paths = FileUtil.stat2Paths(status);
+        for(Path p : paths) {
+          String[] parts = p.getName().split("@");
+          if(fileMap.containsKey(parts[0])) {
+              fileMap.get(parts[0]).add(p);
+          }else {
+        	  fileMap.put(parts[0], new TreeSet<Path>(Collections.reverseOrder()));
+        	  fileMap.get(parts[0]).add(p);
+          }
+        }
+       
+		int port = 5051;
+		final ExecutorService service = Executors.newCachedThreadPool();
+		ServerSocket serverSocket = new ServerSocket(port);
+		serverSocket.setReuseAddress(true);
+		int i = 0;
+        while(true){
+            Socket clientSocket = serverSocket.accept();
+            service.submit(new TabletService(clientSocket));
+            i = i + 1;
+            
+            // Every 10 requests see if memtable has grown
+            if(i == 2) {
+            	copyToDisk();
+            	i = 0;
+            }
+        }
+	}
+	
+	public static void copyToDisk() throws IOException {
+		Set<String> tables = memtable.keySet();
+		Iterator<String> tableIterator = tables.iterator();
+		while(tableIterator.hasNext()){
+			String table = tableIterator.next();
+			
+			if(memtable.get(table).size() > 100) {
+				//	write to file
+				//	tablename@count.tablet
+				int count = 0;
+				if(fileMap.containsKey(table)) {
+					count = fileMap.get(table).size();
+				}else {
+					fileMap.put(table, new TreeSet<Path>(Collections.reverseOrder()));
+				}
+
+				String fileName = table + "@" + count + ".tablet";
+				Path path = new Path(prefix + fileName);
+				fileMap.get(table).add(path);
+				System.out.println("Writing " + table + "to " + path);
+				writeFile(path, Utils.gson.toJson(memtable.get(table)));
+				// Empty memtable for table
+				memtable.get(table).clear();
+			}
+		}
+	}
+	
+	public static SmallRow searchDisk(String table, String key) throws IOException {
+		if(!fileMap.containsKey(table)) {
+			System.err.println("No files on disk for this table");
+			return null;
+		}
+		Iterator<Path> listIterator = fileMap.get(table).iterator();
+		while(listIterator.hasNext()) {
+			Path path = listIterator.next();
+			System.out.println("Searching -" + path);
+			String data = readFile(path);
+			TreeMap<String, SmallRow> tableMap = Utils.gson.fromJson(data, new TypeToken<TreeMap<String, SmallRow>>(){}.getType());
+			//System.out.println("Data -" + tableMap);
+			if(tableMap.containsKey(key)) {
+				return tableMap.get(key);
+			}
+		}
+		return null;
+	}
+	
+	/*
+	private static TreeMap<String, SmallRow> getTableMap(String data) {
+		TreeMap<String, SmallRow> tableMap = new TreeMap<String, SmallRow>();
+		JsonObject jsonObject =   new JsonParser().parse(data).getAsJsonObject();
+        for(Entry<String, JsonElement> entry : jsonObject.entrySet()) {
+        	System.out.println(entry);
+        	tableMap.put(entry.getKey(), Utils.gson.fromJson(entry.getValue().getAsJsonObject(), SmallRow.class));
+        }
+		return tableMap;
+	}*/
+	
+	public static void writeFile(Path path, String data) throws IOException {
+		BufferedWriter bufferedWriter = new BufferedWriter(new OutputStreamWriter(Utils.fs.create(path)));
+        bufferedWriter.write(data);
+        bufferedWriter.close();
+	}
+	
+	public static String readFile(Path path) throws IOException {
+		if(!Utils.fs.exists(path)) {
+			System.err.println("Not able to read file" + path);
+			return null;
+		}
+		BufferedReader bufferedReader = new BufferedReader(new InputStreamReader(Utils.fs.open(path)));
+	    String contents = "";
+	    String line = bufferedReader.readLine();
+	    while (line != null) {
+	    	contents = contents + line;
+	    	line = bufferedReader.readLine();
+	   }
+	    return contents;
+	}
+}
